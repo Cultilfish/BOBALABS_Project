@@ -7,6 +7,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# Client messages contain emoji; don't crash on Windows consoles that can't print them.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 from dotenv import load_dotenv  # noqa: E402
 
 from app.assistant import Assistant  # noqa: E402

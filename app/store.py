@@ -217,7 +217,9 @@ class SupabaseStore(PromptStore):
 
 
 def store_from_env() -> PromptStore:
-    url, key = os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY")
+    # strip(): a stray space pasted into a hosting dashboard broke the URL once.
+    url = (os.getenv("SUPABASE_URL") or "").strip()
+    key = (os.getenv("SUPABASE_KEY") or "").strip()
     if url and key:
         return SupabaseStore(url, key)
     return SQLiteStore(os.getenv("SQLITE_PATH", "prompts.db"))

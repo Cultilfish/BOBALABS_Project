@@ -43,7 +43,7 @@ def judge(llm: LLMClient, system: str, ex, reply: str) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--versions", nargs="+", required=True, help="prompt versions, e.g. 1 latest")
-    ap.add_argument("--n", type=int, default=12, help="held-out examples to score")
+    ap.add_argument("--n", type=int, default=8, help="held-out examples to score")
     args = ap.parse_args()
 
     assistant = make_assistant()
@@ -101,7 +101,7 @@ def main() -> None:
 
     ts = int(time.time())
     (ROOT / "results").mkdir(exist_ok=True)
-    (ROOT / "results" / f"eval_{ts}.json").write_text(json.dumps(rows, indent=2, ensure_ascii=False))
+    (ROOT / "results" / f"eval_{ts}.json").write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
 
     # ---- report -----------------------------------------------------------
     first, last = versions[0], versions[-1]

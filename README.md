@@ -1,159 +1,115 @@
-# Self-learning visa support assistant (BOBALAB take-home)
+# Self-learning visa support assistant (BOBALAB technical assessment)
 
-A Flask microservice that replies to Thai DTV visa clients the way the agency's human consultants do. It improves itself by comparing its replies with real consultant replies and editing its own prompt, safely and with full version history.
+> **Brief Introduction** Greetings user. My name is Daniel Jeejo Nooranal from Robotics & AI and I have created an AI messaging agent that improves based on the training data provided for visa related questions. This is what the project is below.
 
-- **Live server:** `https://YOUR-APP.onrender.com` _(TODO)_
-- **Try it:** `BASE=https://YOUR-APP.onrender.com bash docs/curl_examples.sh`
-- **Results:** [docs/BEFORE_AFTER.md](docs/BEFORE_AFTER.md) · **Data findings:** [docs/DATA_INSIGHTS.md](docs/DATA_INSIGHTS.md) · **AI usage:** [AI_USAGE.md](AI_USAGE.md)
+A Flask microservice that answers Thai DTV visa clients the way the agency's human consultants do: short, warm, and always moving the client one step forward. It **improves itself** by comparing its replies with real consultant replies and editing its own prompt, with guardrails, full version history and measured before/after results.
 
-> The free Render instance sleeps when idle, so the first request can take 30-50 seconds.
-
----
+| | |
+|---|---|
+| **Live server** | https://bobalab-visa-assistant.onrender.com (free tier: first request may take about 50s to wake) |
+| **Prompt history** | https://bobalab-visa-assistant.onrender.com/prompt/history |
+| **Model** | Gemini (`gemini-3.5-flash-lite`), chosen by benchmark; see [3.5](docs/3_IMPROVEMENTS_AND_RESULTS.md#35-engineering-problems-found-and-fixed-while-building) |
+| **Database** | Supabase (Postgres), append-only prompt versions |
 
 ## Quick test
 
 ```bash
-curl -s -X POST https://YOUR-APP.onrender.com/generate-reply \
+curl -s -X POST https://bobalab-visa-assistant.onrender.com/generate-reply \
   -H "Content-Type: application/json" \
   -d '{"clientSequence": "I'\''m American and currently in Bali. Can I apply from Indonesia?",
        "chatHistory": [
          {"role": "client", "message": "Hello, I'\''m interested in the DTV visa. I work remotely for a US company."},
          {"role": "consultant", "message": "Hi there! May I know your nationality and which country you'\''d like to apply from?"}]}'
 ```
+Example response (captured from the live server):
+```json
+{"aiReply": "Yes, you can apply from Indonesia! ... To start, download our app, create an account, and upload your documents for a free review by our legal team. What email will you use to sign up?", "promptVersion": 1}
+```
 
-All three required endpoints, with expected responses, are in [`docs/curl_examples.sh`](docs/curl_examples.sh) and summarised under [API](#api).
+cURL for **all three endpoints** with expected responses: [docs/1_SETUP_AND_USAGE.md § 1.2](docs/1_SETUP_AND_USAGE.md#12-the-three-endpoints-requests-and-expected-responses) and [`docs/curl_examples.sh`](docs/curl_examples.sh). On Windows: `powershell -ExecutionPolicy Bypass -File scripts\test_live.ps1`.
+
+---
+
+## Documentation map
+
+| Read this | For |
+|---|---|
+| **This README** | Overview, headline results, contribution summary |
+| [1 · Setup and usage](docs/1_SETUP_AND_USAGE.md) | Running it, configuration, all endpoints, how to talk to the assistant, maintenance guide |
+| [2 · Findings](docs/2_FINDINGS.md) | Use case diagram, question-type distribution ([spreadsheet](docs/question_distribution.xlsx)), data problems |
+| [3 · Improvements and results](docs/3_IMPROVEMENTS_AND_RESULTS.md) | What was added, balanced training, before/after results, strengths and weaknesses |
+| [AI_USAGE.md](AI_USAGE.md) | AI tools used, key prompts, what I accepted, changed or rejected |
+| [prompts/](prompts/) | The application's final prompts (seed, editors, judge) |
 
 ---
 
 ## How it works
 
 ```
-POST /generate-reply ──► load active prompt (DB) ──► LLM ──► {"aiReply"}
-                                │
-POST /improve-ai ───────► 1. generate predicted reply with current prompt
-                          2. editor LLM compares predicted vs real consultant reply
-                          3. editor returns a minimal edit + diagnosis
-                          4. guardrails check the edit ──✗──► rejected, nothing saved
-                          5. ✓ save as a NEW prompt version (old ones are kept)
-POST /improve-ai-manually ─► same, driven by reviewer instructions (looser guardrails)
+POST /generate-reply ─────► load active prompt (Supabase) ─► Gemini ─► {"aiReply"}
+
+POST /improve-ai ─────────► 1. predict a reply with the current prompt
+                            2. editor LLM compares it with the REAL consultant reply
+                            3. editor proposes the smallest prompt edit + diagnosis
+                            4. guardrails check ──✗──► rejected, nothing saved
+                            5. ✓ saved as a NEW version (old versions kept, rollback possible)
+
+POST /improve-ai-manually ► same flow, driven by a reviewer's plain-English instructions
 ```
 
-**Two prompts with different jobs**
-- **Reply prompt** (`prompts/reply_seed.md`, then the database) holds tone, sales flow and business facts. This is the part that learns.
-- **Editor prompts** (`prompts/editor_*.md`) are fixed in code. They define *how* the reply prompt may change, so the system can't rewrite its own learning rules.
+- **Two kinds of prompt.** The reply prompt (in the database) learns. The editor prompts (in code) are fixed, so the system can't rewrite its own learning rules.
+- **Self-learning can't break the API.** The "return JSON" instruction is appended in code, outside the editable prompt.
+- **Guardrails** reject edits that bloat or truncate the prompt, drop sections, copy data placeholders, or teach forbidden behaviour such as claiming account access or coaching clients to mislead an embassy.
+- **Every edit returns a diff and a diagnosis**, and `"dryRun": true` previews an edit without saving it.
 
-**Output contract outside the editable prompt.** The "return JSON `{"reply": ...}`" instruction is appended in code (`app/assistant.py: OUTPUT_CONTRACT`). A self-edit therefore can't break parsing, which is the most common way naive self-editing prompts fail.
+## Headline results
 
-**Versioned, append-only storage.** Every change becomes a new row in `prompt_versions` with its source (`seed` / `auto` / `manual` / `rollback`), a change summary, the editor's diagnosis and the example that caused it. The active prompt is the highest version. Rollback appends a copy of an old version, so history is never lost.
+Trained prompt (v9) against the original seed (v1), on 8 held-out turns from conversations never used in training, scored 1–5 by an LLM judge:
 
-**Guardrails on automatic edits** (`app/assistant.py: check_prompt_edit`). An edit is rejected, and not saved, if it:
-- grows the prompt by more than ~25% in one step (overfitting to one example), or shrinks it by more than 30% (truncation);
-- removes a section heading;
-- copies a data placeholder such as `[APP_LINK]` into the prompt;
-- teaches a forbidden behaviour, such as claiming to see the client's account or confirming payments;
-- exceeds `MAX_PROMPT_CHARS`.
+| | v1 seed | v9 trained |
+|---|---:|---:|
+| Overall | 3.88 | **4.12** |
+| Content (right facts) | 4.12 | 4.38 |
+| Next step (moves client forward) | 3.88 | **4.25** |
+| Style / sounds human | 4.12 / 4.12 | 4.12 / 4.12 |
 
-Every response includes a unified **diff** of the edit, so a reviewer can see exactly what the system learned. Add `"dryRun": true` to preview an edit without saving it.
-
-## What I learned from the data and built in
-Full write-up: [docs/DATA_INSIGHTS.md](docs/DATA_INSIGHTS.md). The main points:
-- Real consultant replies have a median of 36 words, a third use lists, and they rarely use emojis. The prompt targets that register (friendly and direct) rather than slangy "casual".
-- **There is no ghosting in the dataset.** Every conversation ends with the consultant, so drop-off patterns can't be learned from it. I state this rather than invent patterns, and the doc describes how I'd measure it with real data.
-- **The data contains mistakes the bot shouldn't copy.** Laos fees of 5,000 + 10,000 THB are called "18,000 total" (it's 15,000). Consultants also claim account and payment access the bot doesn't have, and some coach clients on what to leave out for the embassy. The seed prompt and the editor's "never learn" list handle all three.
-- The brief's example `chatHistory` is listed **newest-first**, while the data is chronological. The API defaults to oldest-first and accepts `"historyOrder": "newest_first"`.
-
----
-
-## API
-
-| Method | Path | Body | Returns |
-|---|---|---|---|
-| POST | `/generate-reply` | `clientSequence` (string or list), `chatHistory` (list of `{role, message}`, oldest first), optional `historyOrder` | `aiReply`, `promptVersion` |
-| POST | `/improve-ai` | as above + `consultantReply`, optional `dryRun` | `predictedReply`, `updatedPrompt`, `updated`, `version`, `changeSummary`, `diagnosis`, `diff` (or `rejectedReasons`) |
-| POST | `/improve-ai-manually` | `instructions`, optional `dryRun` | `updatedPrompt`, `updated`, `version`, `changeSummary`, `diff` |
-| GET | `/prompt` | | active prompt version |
-| GET | `/prompt/history` | | all versions, newest first (without content) |
-| GET | `/prompt/<n>` | | one version with content |
-| POST | `/prompt/rollback` | `version`; header `X-Admin-Token` | new version restoring version `n` |
-
-Roles accept `client` / `consultant` (plus `user` / `assistant` as aliases). Errors return `{"error": ...}` with 400 for bad input, 401 for a missing token, 502 if the LLM fails after retries, and 503 if the DB is down.
-
----
-
-## Setup
-
-**Requirements:** Python 3.11+, an LLM API key (Gemini free tier works), and optionally a Supabase project.
-
-```bash
-git clone https://github.com/YOUR-USER/bobalab-visa-assistant && cd bobalab-visa-assistant
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements-dev.txt
-cp .env.example .env        # fill in GEMINI_API_KEY (and Supabase, see below)
-pytest -q                   # 20 offline tests, no keys needed
-python wsgi.py              # http://localhost:5000
-```
-
-Without `SUPABASE_URL` / `SUPABASE_KEY`, the app uses a local SQLite file, so you can run everything with only an LLM key. `LLM_PROVIDER=fake` runs fully offline.
-
-**Supabase:** create a project, run [`schema.sql`](schema.sql) in the SQL editor, then put the project URL and the **secret key** (`sb_secret_...`, under Settings → API Keys; the legacy `service_role` key also works) in `.env`. The first request seeds version 1 from `prompts/reply_seed.md`.
-
-**LLM providers:** `LLM_PROVIDER=gemini` (default), `anthropic`, or `openai` (any OpenAI-compatible API such as Groq). Override the model with `LLM_MODEL`. The client retries rate limits and bad JSON, and `LLM_MIN_INTERVAL_SECONDS` spaces out calls on free tiers.
-
-**Deploy to Render:** push to GitHub, then on Render choose New → Blueprint and pick the repo. It reads [`render.yaml`](render.yaml). Set `GEMINI_API_KEY`, `SUPABASE_URL`, `SUPABASE_KEY` and `ADMIN_TOKEN` as environment variables. Use Supabase in production, because Render's disk is wiped on every deploy.
-
-## Training and evaluation
-
-```bash
-python scripts/analyze_data.py                    # dataset statistics (docs/DATA_INSIGHTS.md)
-python scripts/train.py --n 15                    # learn from 15 training examples
-python scripts/train.py --n 15 --url $BASE        # same, through the deployed /improve-ai
-python scripts/evaluate.py --versions 1 latest --n 12   # writes docs/BEFORE_AFTER.md
-```
-
-- **No leakage:** the split is by conversation. `SYNTH_011` to `SYNTH_015` are held out and never used for training (`scripts/common.py`).
-- **Scoring:** an LLM judge (`prompts/judge.md`) scores each reply 1-5 against the real consultant reply on content, next step, style, human-ness and overall. Plain metrics (word count, robotic-phrase count) back it up. Set `JUDGE_PROVIDER` / `JUDGE_MODEL` to judge with a different model from the one generating replies.
-
-## Project layout
-
-```
-app/
-  __init__.py       Flask routes and error handling
-  assistant.py      generate / improve logic, guardrails, diff
-  conversation.py   dataset parsing and input normalisation
-  llm.py            provider-agnostic LLM client (Gemini / Claude / OpenAI-compatible / fake)
-  store.py          versioned prompt store (Supabase or SQLite)
-prompts/            reply seed, two editor prompts, judge prompt
-scripts/            analyze_data, train, evaluate
-tests/              offline pytest suite
-docs/               data insights, cURL examples, before/after results
-schema.sql  render.yaml  wsgi.py
-```
+This is a positive direction on a small sample (3 turns better, 2 worse, 3 the same), not proof. Details, worked examples and caveats: [docs/3 § 3.4](docs/3_IMPROVEMENTS_AND_RESULTS.md#34-test-results-before-vs-after).
 
 ---
 
 ## Contribution summary
 
-_TODO: rewrite this section in your own words. The reviewers want your reasoning._
-
 **Key decisions**
-- Kept the output contract out of the editable prompt, so self-learning can't break the API.
-- Made storage append-only and versioned, with rollback, so a bad self-edit is recoverable and every change is auditable.
-- Added guardrails and a "never learn" list, because learning from raw human replies would teach the bot real mistakes found in the data.
-- Wrote the seed prompt from measured data patterns rather than a generic "helpful assistant" prompt.
-- Split train and test by conversation, and built an evaluation script, so improvement claims are measured rather than eyeballed.
-- Called the LLMs over plain HTTP with one small client, which makes it easy to switch provider when a free tier runs out.
+- **Category-balanced training, adapted from my YOLO work in the I² (Intania Square) Hackathon.** Rare but important situations, like visa rejections (2.3% of the data), were being drowned out by common ones. Training now picks examples evenly across all 13 question types, which raised coverage from 7 to 13 types.
+- **Question-type distribution analysis.** I wanted to see what clients actually ask about, and whether the data was imbalanced, before deciding how to train. It showed that the three most common types make up 35% of the data while the rarest are under 4% ([spreadsheet](docs/question_distribution.xlsx)).
+- **Choosing the model by benchmark, not by default.** `gemini-3.8-flash` timed out even on a one-word test, so I benchmarked the available models and chose `gemini-3.5-flash` (about 2s). I moved to `gemini-3.5-flash-lite` when its free daily quota ran out.
+- **Reliability before extras.** Due to restricted time, I deliberately left out optional extras such as Docker and a frontend. I focused on making the required workflow reliable, testable and safe to self-edit (guardrails, versioning and rollback).
+
+**Use of AI tools**
+- Claude wrote most of the code and the first drafts of the documentation. I directed the design, contributed the balanced-training and question-analysis ideas, carried out the setup, deployment and debugging, and checked the results myself: tests, live endpoints, every learned prompt change and the per-example evaluation scores. Full details: [AI_USAGE.md](AI_USAGE.md).
 
 **Known limitations**
-- Learning is one example at a time, so edits can over-correct for one case or undo each other. Batching several examples per edit is the next step.
-- The LLM judge is a model judging a model. It's useful for direction, not a precise number.
-- Facts are hard-coded in the prompt from synthetic data. A real deployment needs a maintained knowledge base, with retrieval, owned by the legal team.
-- The bot can't see accounts, documents or payments, and it says so instead of pretending.
-- The learning endpoints are open by default so reviewers can test them. Set `PROTECT_EDIT_ENDPOINTS=true` to require the admin token.
-- There's no conversation memory server-side. The caller sends the history each time, as the spec describes.
+- Small evaluation (8 held-out turns) because of the free-tier quota, scored by a judge from the same model family as the assistant.
+- Rare question types (interviews, eligibility, rejections) appear only in the training data, so the evaluation can't measure them.
+- The prompt learns from one example per edit, so edits can over-correct; facts live in the prompt rather than a maintained knowledge base.
+- The free Render instance sleeps when idle, so the first request can take about 50 seconds.
 
-**Next steps I'd take**
-- Accept an edit only if held-out scores don't drop (a validation gate), and batch examples per edit.
-- Add a small web UI showing conversations, the version timeline and diffs.
-- Use real conversation data to model drop-off, then flag high-intent clients for a human.
+**Unfinished**
+- A validation gate that accepts a prompt edit only if held-out scores don't drop. It's designed, but not built.
+- Evaluation on all 43 held-out turns, with a judge from a different model provider.
+- Data augmentation: reworded variations of rare questions, to give the system more examples of uncommon situations.
+- A small web interface showing the prompt version timeline and the diff of each change.
 
-**Unfinished:** _TODO_
+---
+
+## Project layout
+
+```
+app/          Flask app: routes, assistant logic + guardrails, LLM client, prompt store, question types
+prompts/      reply_seed.md (v1), editor_from_example.md, editor_from_instructions.md, judge.md
+scripts/      analyze_data, question_distribution, train, evaluate, check_llm, test_live.ps1
+tests/        22 offline tests (python -m pytest -q)
+docs/         the three documents above, spreadsheet, generated before/after report, cURL examples
+data/         conversations.json (sample data provided)
+schema.sql    Supabase table · render.yaml  Render deploy · .env.example  settings template
+```

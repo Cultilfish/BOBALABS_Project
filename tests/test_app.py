@@ -18,13 +18,15 @@ HISTORY = [
     {"role": "consultant", "message": "Hi there! May I know your nationality and where you'd like to apply from?"},
 ]
 
+
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
     # Present-but-empty values stop a developer's .env (loaded by create_app)
     # from switching on the admin token during tests.
     monkeypatch.setenv("ADMIN_TOKEN", "")
     monkeypatch.setenv("PROTECT_EDIT_ENDPOINTS", "false")
-    
+
+
 @pytest.fixture
 def store(tmp_path):
     return SQLiteStore(str(tmp_path / "t.db"))
@@ -149,3 +151,21 @@ def test_guardrail_rejection_does_not_save(store, monkeypatch):
     data = c.post("/improve-ai", json={"clientSequence": "x?", "consultantReply": "y"}).get_json()
     assert data["updated"] is False and data["rejectedReasons"]
     assert store.get_active().version == 1
+
+
+# --- question categories / balanced sampling --------------------------------
+def test_every_example_gets_a_known_category():
+    from app.categories import all_categories, categorize
+    names = {n for n, _ in all_categories()}
+    for e in build_examples(load_conversations(DATA)):
+        assert categorize(e.client_sequence) in names
+
+
+def test_balanced_sample_covers_more_types_without_duplicates():
+    from app.categories import balanced_sample, categorize
+    from app.conversation import split_by_contact
+    train, _ = split_by_contact(build_examples(load_conversations(DATA)), {"SYNTH_011", "SYNTH_012"})
+    picked = balanced_sample(train, 15)
+    assert len(picked) == 15 and len({id(e) for e in picked}) == 15
+    types = {categorize(e.client_sequence) for e in picked}
+    assert len(types) >= 10

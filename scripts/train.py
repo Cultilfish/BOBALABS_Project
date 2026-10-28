@@ -9,6 +9,7 @@ Usage:
   python scripts/train.py --n 15 --url https://your-app.onrender.com
                                             # through the deployed /improve-ai endpoint
   python scripts/train.py --n 5 --dry-run   # show proposed edits, save nothing
+  python scripts/train.py --n 15 --balanced # cover every question type (rare ones first)
 """
 from __future__ import annotations
 
@@ -20,17 +21,23 @@ import requests
 
 from common import ROOT, load_split, make_assistant, spread
 
+from app.categories import balanced_sample, categorize
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=15, help="number of training examples to learn from")
     ap.add_argument("--url", help="base URL of a deployed server (otherwise runs in-process)")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--balanced", action="store_true",
+                    help="pick examples round-robin across question categories (oversample rare types)")
     args = ap.parse_args()
 
     train, _ = load_split()
-    examples = spread(train, args.n)
-    print(f"Training on {len(examples)} of {len(train)} training examples\n")
+    examples = balanced_sample(train, args.n) if args.balanced else spread(train, args.n)
+    cats = sorted({categorize(e.client_sequence) for e in examples})
+    print(f"Training on {len(examples)} of {len(train)} training examples "
+          f"({'balanced' if args.balanced else 'even spread'}; {len(cats)} question types)\n")
     assistant = None if args.url else make_assistant()
 
     log = []
@@ -53,16 +60,18 @@ def main() -> None:
         status = "UPDATED" if res.get("updated") else ("REJECTED" if res.get("rejectedReasons") else "no change")
         print(f"[{i}/{len(examples)}] {ex.contact_id} v{res.get('previousVersion')}->v{res.get('version')} "
               f"{status} ({time.monotonic() - t0:.0f}s)")
+        print(f"    type:    {categorize(ex.client_sequence)}")
         print(f"    client:  {' / '.join(ex.client_sequence)[:100]}")
         print(f"    change:  {res.get('changeSummary')}")
         if res.get("rejectedReasons"):
             print(f"    blocked: {res['rejectedReasons']}")
-        log.append({"contact": ex.contact_id, "clientSequence": ex.client_sequence,
+        log.append({"contact": ex.contact_id, "category": categorize(ex.client_sequence),
+                    "clientSequence": ex.client_sequence,
                     "consultantReply": ex.consultant_reply, **{k: v for k, v in res.items() if k != "updatedPrompt"}})
 
     out = ROOT / "results" / f"train_log_{int(time.time())}.json"
     out.parent.mkdir(exist_ok=True)
-    out.write_text(json.dumps(log, indent=2, ensure_ascii=False))
+    out.write_text(json.dumps(log, indent=2, ensure_ascii=False), encoding="utf-8")
     updated = sum(1 for e in log if e.get("updated"))
     rejected = sum(1 for e in log if e.get("rejectedReasons"))
     print(f"\nDone: {updated} updates, {rejected} rejected by guardrails, "

@@ -18,7 +18,13 @@ HISTORY = [
     {"role": "consultant", "message": "Hi there! May I know your nationality and where you'd like to apply from?"},
 ]
 
-
+@pytest.fixture(autouse=True)
+def clean_env(monkeypatch):
+    # Present-but-empty values stop a developer's .env (loaded by create_app)
+    # from switching on the admin token during tests.
+    monkeypatch.setenv("ADMIN_TOKEN", "")
+    monkeypatch.setenv("PROTECT_EDIT_ENDPOINTS", "false")
+    
 @pytest.fixture
 def store(tmp_path):
     return SQLiteStore(str(tmp_path / "t.db"))
